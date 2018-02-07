@@ -3,10 +3,11 @@ import os
 import sys
 import time
 import pickle
-import binascii
 import socket
 import struct
-from subprocess import Popen, PIPE
+
+import htcondor
+import iptools
 
 # Reads from an HTCondor XferStatsLog and sends pickled data to a carbon server.
 # An example log entry looks like the following:
@@ -17,8 +18,8 @@ from subprocess import Popen, PIPE
 # rcv_ssthresh: 1964430 rtt: 3000 snd_ssthresh: 2147483647 snd_cwnd: 10 \\
 # advmss: 65483 reordering: 3 rcv_rtt: 1000 rcv_space: 4451824 total_retrans: 0
 
-LOGDIR = Popen(['condor_config_val', 'log'], stdout=PIPE).communicate()[0].rstrip()
-LOGFILE = LOGDIR + '/XferStatsLog'
+LOGDIR = htcondor.param['log']
+LOGFILE = os.path.join(LOGDIR, 'XferStatsLog')
 TMPFILE = "/tmp/xferstats_hosts_last_byte_read"
 SCHEMA = "pools.chtc.jobs.xferstats"
 HOSTNAME = re.sub('[^0-9a-zA-Z]+', '_', socket.gethostname())
@@ -37,94 +38,6 @@ if not os.path.isfile(LOGFILE):
 d = pickle.load(open('osg_ip_dicts.pkl', 'rb'))
 ip2site = d['ip2site']
 cidr2site = d['cidr2site']
-
-# Functions for checking if IP is in CIDR
-# http://diego.assencio.com/?index=85e407d6c771ba2bc5f02b17714241e2
-def ip_in_subnetwork(ip_address, subnetwork):
- 
-    """
-    Returns True if the given IP address belongs to the
-    subnetwork expressed in CIDR notation, otherwise False.
-    Both parameters are strings.
- 
-    Both IPv4 addresses/subnetworks (e.g. "192.168.1.1"
-    and "192.168.1.0/24") and IPv6 addresses/subnetworks (e.g.
-    "2a02:a448:ddb0::" and "2a02:a448:ddb0::/44") are accepted.
-    """
- 
-    (ip_integer, version1) = ip_to_integer(ip_address)
-    (ip_lower, ip_upper, version2) = subnetwork_to_ip_range(subnetwork)
- 
-    if version1 != version2:
-        raise ValueError("incompatible IP versions")
- 
-    return (ip_lower <= ip_integer <= ip_upper)
- 
- 
-def ip_to_integer(ip_address):
- 
-    """
-    Converts an IP address expressed as a string to its
-    representation as an integer value and returns a tuple
-    (ip_integer, version), with version being the IP version
-    (either 4 or 6).
- 
-    Both IPv4 addresses (e.g. "192.168.1.1") and IPv6 addresses
-    (e.g. "2a02:a448:ddb0::") are accepted.
-    """
- 
-    # try parsing the IP address first as IPv4, then as IPv6
-    for version in (socket.AF_INET, socket.AF_INET6):
- 
-        try:
-            ip_hex = socket.inet_pton(version, ip_address)
-            ip_integer = int(binascii.hexlify(ip_hex), 16)
- 
-            return (ip_integer, 4 if version == socket.AF_INET else 6)
-        except:
-            pass
- 
-    raise ValueError("invalid IP address")
- 
- 
-def subnetwork_to_ip_range(subnetwork):
- 
-    """
-    Returns a tuple (ip_lower, ip_upper, version) containing the
-    integer values of the lower and upper IP addresses respectively
-    in a subnetwork expressed in CIDR notation (as a string), with
-    version being the subnetwork IP version (either 4 or 6).
- 
-    Both IPv4 subnetworks (e.g. "192.168.1.0/24") and IPv6
-    subnetworks (e.g. "2a02:a448:ddb0::/44") are accepted.
-    """
- 
-    try:
-        fragments = subnetwork.split('/')
-        network_prefix = fragments[0]
-        netmask_len = int(fragments[1])
- 
-        # try parsing the subnetwork first as IPv4, then as IPv6
-        for version in (socket.AF_INET, socket.AF_INET6):
- 
-            ip_len = 32 if version == socket.AF_INET else 128
- 
-            try:
-                suffix_mask = (1 << (ip_len - netmask_len)) - 1
-                netmask = ((1 << ip_len) - 1) - suffix_mask
-                ip_hex = socket.inet_pton(version, network_prefix)
-                ip_lower = int(binascii.hexlify(ip_hex), 16) & netmask
-                ip_upper = ip_lower + suffix_mask
- 
-                return (ip_lower,
-                        ip_upper,
-                        4 if version == socket.AF_INET else 6)
-            except:
-                pass
-    except:
-        pass
- 
-    raise ValueError("invalid subnetwork")
 
 def connect_to_carbon(server, port, retry_time):
     '''
@@ -145,6 +58,7 @@ def connect_to_carbon(server, port, retry_time):
         else:
             break
     return sock
+
 
 def run(sock, delay):
 
@@ -221,7 +135,7 @@ def run(sock, delay):
                 pool_site = ip2site[ip]
             else:
                 for cidr in cidr2site:
-                    if ip_in_subnetwork(ip, cidr):
+                    if iptools.ip_in_subnetwork(ip, cidr):
                         pool_site = cidr2site[cidr]
                         break
                 if pool_site == 'Unknown':
